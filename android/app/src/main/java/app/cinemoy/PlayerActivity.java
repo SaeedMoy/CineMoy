@@ -131,7 +131,7 @@ public class PlayerActivity extends Activity {
                 .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                 .setEnableDecoderFallback(true);
         DefaultLoadControl load = new DefaultLoadControl.Builder()
-                .setBufferDurationsMs(30_000, 120_000, 3_000, 6_000)
+                .setBufferDurationsMs(30_000, 120_000, 3_000, 10_000)
                 .build();
         player = new ExoPlayer.Builder(this, renderers)
                 .setMediaSourceFactory(new DefaultMediaSourceFactory(new DefaultDataSource.Factory(this, http)))

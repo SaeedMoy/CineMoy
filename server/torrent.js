@@ -19,11 +19,30 @@ const TRACKERS = [
   'udp://tracker.torrent.eu.org:451/announce',
   'udp://explodie.org:6969/announce',
   'udp://tracker.dler.org:6969/announce',
+  'udp://tracker.openbittorrent.com:6969/announce',
+  'udp://open.tracker.cl:1337/announce',
+  'udp://tracker.theoks.net:6969/announce',
+  'udp://tracker.qu.ax:6969/announce',
+  'udp://tracker-udp.gbitt.info:80/announce',
+  'http://tracker.opentrackr.org:1337/announce', // reaches peers where UDP is filtered
+  'https://tracker.tamersunion.org:443/announce',
   'wss://tracker.openwebtorrent.com',
 ];
 
+// Pieces just ahead of the playback position are "critical": a fast peer may take them over
+// from a slow one instead of the player waiting on the slowest peer. WebTorrent itself marks
+// at most 1 MB, which is less than a single piece in most movie torrents.
+const READ_AHEAD = 24 * 1024 * 1024;
+const MIN_CRITICAL_PIECES = 4;
+
 fs.rmSync(CACHE_DIR, { recursive: true, force: true });
-const client = new WebTorrent({ maxConns: 80 });
+const { torrentPort, uploadLimit } = options;
+const client = new WebTorrent({
+  maxConns: 100,
+  torrentPort,
+  dhtPort: torrentPort,
+  uploadLimit: uploadLimit >= 0 ? uploadLimit * 1024 : -1,
+});
 client.on('error', e => console.error('[torrent]', e.message));
 
 const active = new Map(); // infoHash -> { torrent, lastUsed, ready: Promise }
@@ -129,6 +148,18 @@ export async function streamHandler(req, res) {
     const rec = active.get(torrent.infoHash);
     const keepAlive = setInterval(() => { if (rec) rec.lastUsed = Date.now(); }, 10000);
     const stream = file.createReadStream({ start, end });
+    const pieceLen = torrent.pieceLength;
+    const lastPiece = Math.floor((file.offset + end) / pieceLen);
+    const ahead = Math.max(MIN_CRITICAL_PIECES, Math.ceil(READ_AHEAD / pieceLen));
+    let pos = start, criticalFrom = -1;
+    const markCritical = () => {
+      const piece = Math.floor((file.offset + pos) / pieceLen);
+      if (piece === criticalFrom) return;
+      criticalFrom = piece;
+      torrent.critical(piece, Math.min(piece + ahead, lastPiece));
+    };
+    markCritical();
+    stream.on('data', chunk => { pos += chunk.length; markCritical(); });
     stream.pipe(res);
     const done = () => { clearInterval(keepAlive); stream.destroy(); };
     res.on('close', done);

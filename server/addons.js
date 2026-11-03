@@ -6,12 +6,32 @@ const cache = new Map();
 async function getJson(url, ttlMs = 10 * 60 * 1000) {
   const hit = cache.get(url);
   if (hit && hit.exp > Date.now()) return hit.data;
-  const res = await fetch(url, { headers: { 'User-Agent': 'CineMoy/0.1' }, signal: AbortSignal.timeout(20000) });
-  if (!res.ok) throw new Error(`${res.status} from ${new URL(url).host}`);
-  const data = await res.json();
+  let data;
+  try {
+    data = await fetchJson(url);
+  } catch (e) {
+    if (hit) return hit.data; // flaky link: an older answer beats an error
+    throw e;
+  }
   cache.set(url, { data, exp: Date.now() + ttlMs });
   if (cache.size > 500) cache.delete(cache.keys().next().value);
   return data;
+}
+
+// Filtered/VPN links drop connections at random (ECONNRESET, TLS resets): retry a few times.
+async function fetchJson(url, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': 'CineMoy/0.1' }, signal: AbortSignal.timeout(15000) });
+      if (res.ok) return await res.json();
+      const err = new Error(`${res.status} from ${new URL(url).host}`);
+      if (res.status < 500 || i >= attempts) throw Object.assign(err, { final: true });
+      throw err;
+    } catch (e) {
+      if (e.final || i >= attempts) throw e;
+      await new Promise(r => setTimeout(r, 800 * i));
+    }
+  }
 }
 
 const enc = encodeURIComponent;

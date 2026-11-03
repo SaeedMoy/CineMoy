@@ -770,10 +770,44 @@ const player = (() => {
   // Browser / Android back button while the player is open closes the player.
   addEventListener('popstate', () => { if (st && !history.state?.player) close(); });
 
+  // Torrent data arrives in bursts. The browser resumes as soon as it has a fraction of a second,
+  // which turns a slow torrent into constant stop/start; after a stall, hold until there is a cushion.
+  const REBUFFER_S = 8, REBUFFER_MAX_MS = 30000;
+  let stalled = true, holdTimer = null;
+  function bufferedAhead() {
+    const t = video.currentTime;
+    for (let i = 0; i < video.buffered.length; i++) {
+      if (t >= video.buffered.start(i) - 0.5 && t <= video.buffered.end(i)) return video.buffered.end(i) - t;
+    }
+    return 0;
+  }
+  function holdForBuffer() {
+    const left = (isFinite(video.duration) ? video.duration : Infinity) - video.currentTime;
+    if (holdTimer || bufferedAhead() >= Math.min(REBUFFER_S, left - 1)) return false;
+    const since = Date.now();
+    video.pause();
+    showLoading('Buffering…');
+    holdTimer = setInterval(() => {
+      if (!st || video.ended) return releaseHold(false);
+      if (bufferedAhead() >= Math.min(REBUFFER_S, left - 1) || Date.now() - since > REBUFFER_MAX_MS) releaseHold(true);
+    }, 500);
+    return true;
+  }
+  function releaseHold(resume) {
+    clearInterval(holdTimer);
+    holdTimer = null;
+    if (resume) video.play().catch(() => {});
+  }
+
   // -------- video events
-  video.addEventListener('waiting', () => showLoading('Buffering…'));
-  video.addEventListener('playing', () => { hideLoading(); wake(); });
-  video.addEventListener('canplay', hideLoading);
+  video.addEventListener('waiting', () => { stalled = true; showLoading('Buffering…'); });
+  video.addEventListener('emptied', () => { stalled = true; releaseHold(false); });
+  video.addEventListener('playing', () => {
+    if (holdTimer) releaseHold(false); // the viewer pressed play during the hold
+    else if (stalled) { stalled = false; if (holdForBuffer()) return; }
+    hideLoading(); wake();
+  });
+  video.addEventListener('canplay', () => { if (!holdTimer) hideLoading(); });
   video.addEventListener('play', () => ($('#pPlay').textContent = '❚❚'));
   video.addEventListener('pause', () => { $('#pPlay').textContent = '▶'; wake(); });
   video.addEventListener('loadedmetadata', () => {

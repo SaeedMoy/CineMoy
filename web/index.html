@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -9,7 +9,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;800&display=swap">
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
   <header id="topbar">
@@ -34,10 +34,10 @@
   <section id="player" hidden>
     <video id="video" playsinline preload="auto"></video>
     <div id="subOverlay" aria-live="off"></div>
-    <div id="loading" hidden><div class="spinner"></div><div id="loadingText">Connecting to peersâ€¦</div></div>
+    <div id="loading" hidden><div class="spinner"></div><div id="loadingText">Connecting to peers…</div></div>
     <div id="controls">
       <div class="ctl-top">
-        <button class="icon-btn focusable" id="pBack" aria-label="Back">â†</button>
+        <button class="icon-btn focusable" id="pBack" aria-label="Back">←</button>
         <div id="pTitle"></div>
         <div id="pStats"></div>
       </div>
@@ -46,15 +46,15 @@
           <div id="seekBuf"></div><div id="seekFill"></div><div id="seekThumb"></div>
         </div>
         <div class="ctl-row">
-          <button class="icon-btn focusable" id="pPlay" aria-label="Play/Pause">â–¶</button>
-          <button class="icon-btn focusable" id="pRew" aria-label="Back 10 seconds">âŸ²10</button>
-          <button class="icon-btn focusable" id="pFwd" aria-label="Forward 10 seconds">10âŸ³</button>
+          <button class="icon-btn focusable" id="pPlay" aria-label="Play/Pause">▶</button>
+          <button class="icon-btn focusable" id="pRew" aria-label="Back 10 seconds">⟲10</button>
+          <button class="icon-btn focusable" id="pFwd" aria-label="Forward 10 seconds">10⟳</button>
           <span id="pTime">0:00 / 0:00</span>
           <span class="spacer"></span>
-          <button class="pill focusable" id="pNext" hidden>Next episode â­</button>
+          <button class="pill focusable" id="pNext" hidden>Next episode ⏭</button>
           <button class="pill focusable" id="pAudio" hidden>Audio</button>
           <button class="pill focusable" id="pSubs">Subtitles</button>
-          <button class="icon-btn focusable" id="pFull" aria-label="Fullscreen">â›¶</button>
+          <button class="icon-btn focusable" id="pFull" aria-label="Fullscreen">⛶</button>
         </div>
       </div>
     </div>
@@ -65,6 +65,6 @@
   <dialog id="update"></dialog>
   <div id="toast" hidden></div>
 
-  <script src="app.js?v=6" type="module"></script>
+  <script src="app.js?v=7" type="module"></script>
 </body>
 </html>

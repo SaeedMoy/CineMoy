@@ -1,0 +1,19 @@
+# docker compose up -d --build   →   open http://localhost:7070
+services:
+  cinemoy:
+    build: .
+    image: cinemoy:latest
+    container_name: cinemoy
+    restart: unless-stopped
+    ports:
+      - "7070:7070"
+      - "6881:6881/tcp" # torrent peers (incoming connections = more peers, faster start)
+      - "6881:6881/udp" # DHT / uTP
+    environment:
+      CINEMOY_UPLOAD_LIMIT: "200" # KB/s, -1 = unlimited
+    volumes:
+      - cinemoy-cache:/cache
+    # On Linux, `network_mode: host` (and no `ports:`) works best.
+
+volumes:
+  cinemoy-cache:

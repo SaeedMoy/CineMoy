@@ -73,8 +73,13 @@ The Windows desktop app also listens on the network, so while it is open your TV
 **Docker (NAS / Raspberry Pi / always-on PC)**
 
 ```bash
-docker build -t cinemoy . && docker run -d --network host --restart unless-stopped cinemoy
+docker compose up -d --build   # then open http://localhost:7070
 ```
+
+The compose file publishes the UI (7070) and a fixed torrent port (6881 TCP+UDP) so peers can connect in;
+forward 6881 on your router for even more peers. On Linux, `docker run -d --network host --restart unless-stopped cinemoy`
+after `docker build -t cinemoy .` works too. Upload is capped at 200 KB/s by default (`CINEMOY_UPLOAD_LIMIT`, KB/s, `-1` = unlimited),
+because a saturated upload slows the download on most home links.
 
 ## TV platforms
 
