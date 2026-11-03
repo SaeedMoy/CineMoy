@@ -25,6 +25,29 @@ async function getJSON(p) {
   return j;
 }
 
+// Catalog/meta/stream answers are kept for a while, so going Back or reopening a title is instant.
+const jsonCache = new Map();
+function cachedJSON(p, ttlMs = 10 * 60 * 1000) {
+  const hit = jsonCache.get(p);
+  if (hit && hit.exp > Date.now()) return hit.promise;
+  const promise = getJSON(p);
+  jsonCache.set(p, { promise, exp: Date.now() + ttlMs });
+  promise.catch(() => jsonCache.delete(p));
+  if (jsonCache.size > 300) jsonCache.delete(jsonCache.keys().next().value);
+  return promise;
+}
+const streamsPath = (type, videoId) => `/api/streams/${type}/${encodeURIComponent(videoId)}?addon=${encodeURIComponent(settings.torrentio)}`;
+
+// Inline icons: symbol characters (♥, ✕…) are missing from many TV fonts.
+const svg = d => `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d}"/></svg>`;
+const ICON = {
+  heart: svg('M12 20.3s-7.3-4.5-9.4-8.9C1.1 8.2 3.1 4.6 6.7 4.6c2.2 0 3.9 1.2 5.3 3.1 1.4-1.9 3.1-3.1 5.3-3.1 3.6 0 5.6 3.6 4.1 6.8-2.1 4.4-9.4 8.9-9.4 8.9z'),
+  bookmark: svg('M6.5 3.5h11v17l-5.5-3.8-5.5 3.8z'),
+  check: svg('m5 12.5 4.5 4.5L19 7.5'),
+  x: svg('M6 6l12 12M18 6 6 18'),
+  plus: svg('M12 5v14M5 12h14'),
+};
+
 function toast(msg, ms = 3500) {
   const t = $('#toast');
   t.textContent = msg; t.hidden = false;
@@ -43,6 +66,101 @@ const progress = {
     store.set('progress', all);
   },
 };
+
+// What a list or Continue watching keeps of a title: enough to draw tiles and the hero banner.
+const brief = m => ({
+  id: m.id, type: m.type, name: m.name, poster: m.poster, background: m.background, logo: m.logo,
+  year: m.year, rating: m.rating, runtime: m.runtime, genres: (m.genres || []).slice(0, 3), description: (m.description || '').slice(0, 400),
+});
+
+// ---------------------------------------------------------------- library (Favorites + watchlists)
+// Stored on this device, like Continue watching. "fav" is the built-in Favorites list; the rest
+// are the user's own lists (a "Watchlist" is there to start with, and can be renamed or deleted).
+const library = (() => {
+  const keyOf = m => `${m.type}:${m.id}`;
+  let data = store.get('library', null);
+  if (!data?.lists?.some(l => l.id === 'fav')) {
+    data = { lists: [{ id: 'fav', name: 'Favorites', items: [] }, { id: 'watch', name: 'Watchlist', items: [] }] };
+  }
+  const save = () => store.set('library', data);
+  const get = id => data.lists.find(l => l.id === id);
+  const has = (id, m) => !!get(id)?.items.some(i => keyOf(i) === keyOf(m));
+  return {
+    lists: () => data.lists,
+    get, has,
+    isFav: m => has('fav', m),
+    listsWith: m => data.lists.filter(l => l.id !== 'fav' && has(l.id, m)),
+    // Returns true when the title is now in the list.
+    toggle(id, m) {
+      const l = get(id);
+      if (!l) return false;
+      const i = l.items.findIndex(x => keyOf(x) === keyOf(m));
+      if (i >= 0) l.items.splice(i, 1); else l.items.unshift({ ...brief(m), added: Date.now() });
+      save();
+      return i < 0;
+    },
+    create(name) {
+      const l = { id: 'l' + Date.now().toString(36), name, items: [] };
+      data.lists.push(l);
+      save();
+      return l;
+    },
+    rename(id, name) { const l = get(id); if (l) { l.name = name; save(); } },
+    remove(id) { if (id !== 'fav') { data.lists = data.lists.filter(l => l.id !== id); save(); } },
+  };
+})();
+
+// ---------------------------------------------------------------- navigation memory
+// Going Back puts focus and scroll positions where they were (the hash is the key).
+const navMemory = new Map();
+const hashKey = () => location.hash || '#/';
+const memoId = el => el && (el.getAttribute('href') || el.dataset.key || el.id) || null;
+function rememberView(hash) {
+  const a = document.activeElement;
+  const rowX = {};
+  view.querySelectorAll('.shelf[data-s]').forEach(s => { const r = s.querySelector('.row'); if (r?.scrollLeft) rowX[s.dataset.s] = r.scrollLeft; });
+  navMemory.set(hash, {
+    focus: a && view.contains(a) ? memoId(a) : null,
+    shelf: a && view.contains(a) ? a.closest('.shelf')?.dataset.s : null, // a title can be on several shelves
+    y: scrollY, rowsY: $('#rows')?.scrollTop || 0, rowX,
+    count: view.querySelectorAll('.grid > .poster-card').length,
+  });
+  if (navMemory.size > 40) navMemory.delete(navMemory.keys().next().value);
+}
+// Scroll without the CSS smooth animation.
+function jump(el, top, left) {
+  el.style.scrollBehavior = 'auto';
+  if (top != null) el.scrollTop = top;
+  if (left != null) el.scrollLeft = left;
+  el.style.scrollBehavior = '';
+}
+function restoreIn(root, memo) {
+  if (!memo) return;
+  root.querySelectorAll('.shelf[data-s]').forEach(s => { const x = memo.rowX[s.dataset.s]; if (x) jump(s.querySelector('.row'), null, x); });
+  if (!memo.focus || memo.focused) return;
+  let scope = root;
+  if (memo.shelf) {
+    const sel = `.shelf[data-s="${CSS.escape(memo.shelf)}"]`;
+    scope = root.matches(sel) ? root : root.querySelector(sel);
+  }
+  const el = scope && [...scope.querySelectorAll(FOCUSABLE)].find(e => memoId(e) === memo.focus);
+  if (!el) return;
+  memo.focused = true;
+  el.focus({ preventScroll: true });
+  // Shelves above it may have changed (a new list, a removed title): bring it into view.
+  const rows = $('#rows'), shelf = el.closest('.shelf');
+  if (rows && shelf && getComputedStyle(rows).overflowY === 'auto') jump(rows, shelf.offsetTop);
+  else el.scrollIntoView({ block: 'nearest' });
+  const row = el.closest('.row');
+  if (row) {
+    const r = row.getBoundingClientRect(), b = el.getBoundingClientRect();
+    if (b.left < r.left || b.right > r.right) jump(row, null, row.scrollLeft + b.left - r.left - 40);
+  }
+}
+function setPage(name, html) {
+  view.dataset.page = name;
+  view.innerHTML = html;
+}
 
 // ---------------------------------------------------------------- views
 const view = $('#view');
@@ -99,17 +217,21 @@ function tile(m, prog) {
   const pct = prog?.dur ? Math.min(100, (prog.pos / prog.dur) * 100) : 0;
   const img = m.background || m.poster;
   return `<a class="tile focusable" tabindex="0" href="${titleHref(m, prog?.videoId)}" data-key="${esc(key)}">
-    <div class="tile-art">${img ? `<img src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</div>
+    <div class="tile-art">${img ? lazyImg(img) : ''}</div>
     <div class="tile-cap"><span>${esc(m.name)}</span>${prog?.season ? `<small>S${prog.season} · E${prog.episode}</small>` : ''}</div>
+    ${favMark(m)}
     ${pct ? `<div class="tile-prog"><i style="width:${pct}%"></i></div>` : ''}
   </a>`;
 }
+// Images fade in when they arrive instead of popping in.
+const lazyImg = src => `<img class="fade" src="${esc(src)}" alt="" loading="lazy" decoding="async" onload="this.classList.add('in')" onerror="this.remove()">`;
+const favMark = m => (library.isFav(m) ? `<span class="fav-mark" title="Favorite">${ICON.heart}</span>` : '');
 
 // Portrait poster (grids).
 function poster(m) {
   heroItems.set(`${m.type}:${m.id}`, m);
   return `<a class="poster-card focusable" tabindex="0" href="${titleHref(m)}">
-    <div class="poster-art">${m.poster ? `<img src="${esc(m.poster)}" alt="" loading="lazy">` : ''}</div>
+    <div class="poster-art">${m.poster ? lazyImg(m.poster) : ''}${favMark(m)}</div>
     <div class="poster-name">${esc(m.name)}</div>
     <div class="poster-sub">${esc(m.year || '')}${m.rating ? ` · ★ ${esc(m.rating)}` : ''}</div>
   </a>`;
@@ -148,71 +270,298 @@ const heroMarkup = `<section class="hero" id="hero" aria-live="polite">
     <div class="hero-info"></div>
   </section>`;
 
+// Resting on a title for a moment fetches its page (and a movie's sources) ahead of the click.
+let prefetchTimer;
+function prefetch(m) {
+  clearTimeout(prefetchTimer);
+  if (!m) return;
+  prefetchTimer = setTimeout(() => {
+    cachedJSON(`/api/meta/${m.type}/${encodeURIComponent(m.id)}`).catch(() => {});
+    if (m.type === 'movie') cachedJSON(streamsPath('movie', m.id), 5 * 60 * 1000).catch(() => {});
+  }, 700);
+}
+
 function bindHero(root) {
-  const pick = e => { const t = e.target.closest?.('[data-key]'); if (t) setHero(heroItems.get(t.dataset.key)); };
+  const pick = e => {
+    const t = e.target.closest?.('[data-key]');
+    if (!t) return;
+    const m = heroItems.get(t.dataset.key);
+    setHero(m);
+    prefetch(m);
+  };
   root.addEventListener('focusin', pick);
   root.addEventListener('mouseover', pick);
 }
+
+const seeAllTile = (href, title) => `<a class="tile more-tile focusable" tabindex="0" href="${href}"><span>See all<br>${esc(title)}</span></a>`;
 
 // ---- shelves page: hero banner + rows (Home / Movies / Series)
 async function shelves(tab) {
   setTab(tab);
   heroKey = null;
+  const memo = navMemory.get(hashKey());
+  if (memo) memo.focused = false;
   const cont = tab === 'home' ? Object.values(progress.all()).sort((a, b) => b.updated - a.updated).slice(0, 20) : [];
+  const mine = tab === 'home' ? library.lists().filter(l => l.items.length) : [];
   const list = SHELVES[tab];
-  view.innerHTML = `<div class="browse">${heroMarkup}
+  setPage('shelves', `<div class="browse">${heroMarkup}
     <div class="rows" id="rows">
-      ${cont.length ? `<section class="shelf"><h2>Continue watching</h2><div class="row">${cont.map(p => tile(p, p)).join('')}</div></section>` : ''}
-      ${list.map((s, i) => `<section class="shelf" data-i="${i}"><h2>${esc(s.title)} <a class="see-all" href="${s.href}" tabindex="-1">See all ›</a></h2>
+      ${cont.length ? `<section class="shelf" data-s="cont"><h2>Continue watching</h2><div class="row">${cont.map(p => tile(p, p)).join('')}</div></section>` : ''}
+      ${mine.map(l => `<section class="shelf" data-s="lib:${esc(l.id)}"><h2>${esc(l.name)} <a class="see-all" href="#/library/${esc(l.id)}" tabindex="-1">See all ›</a></h2>
+        <div class="row">${l.items.slice(0, 24).map(m => tile(m)).join('')}${l.items.length > 24 ? seeAllTile(`#/library/${esc(l.id)}`, l.name) : ''}</div></section>`).join('')}
+      ${list.map((s, i) => `<section class="shelf" data-s="cat:${i}" data-i="${i}"><h2>${esc(s.title)} <a class="see-all" href="${s.href}" tabindex="-1">See all ›</a></h2>
         <div class="row">${skeletonRow(8)}</div></section>`).join('')}
-    </div></div>`;
-  bindHero($('#rows'));
-  if (cont.length) setHero(cont[0], true);
+    </div></div>`);
+  const rows = $('#rows');
+  bindHero(rows);
+  const first = cont[0] || mine[0]?.items[0];
+  if (first) setHero(first, true);
+  if (memo) { jump(rows, memo.rowsY); scrollTo(0, memo.y); restoreIn(rows, memo); }
 
-  let heroSet = !!cont.length;
-  await Promise.all(list.map(async (s, i) => {
+  // Shelves load as they come near the screen: the first rows are not slowed down by the rest.
+  let heroSet = !!first;
+  const load = async i => {
     const row = view.querySelector(`.shelf[data-i="${i}"] .row`);
     try {
-      const items = (await s.load()).slice(0, 24);
+      const items = (await list[i].load()).slice(0, 24);
       if (!row.isConnected) return;
       if (!items.length) return row.closest('.shelf').remove();
-      row.innerHTML = items.map(m => tile(m)).join('') + `<a class="tile more-tile focusable" tabindex="0" href="${s.href}"><span>See all<br>${esc(s.title)}</span></a>`;
-      if (!heroSet && items[0]) { heroSet = true; setHero(items[0], true); }
+      row.innerHTML = items.map(m => tile(m)).join('') + seeAllTile(list[i].href, list[i].title);
+      if (!heroSet) { heroSet = true; setHero(items[0], true); }
+      restoreIn(row.closest('.shelf'), memo);
     } catch {
       if (row.isConnected) row.closest('.shelf').remove();
     }
-  }));
+  };
+  // On phones the page itself scrolls; elsewhere the rows area does.
+  const scroller = getComputedStyle(rows).overflowY === 'auto' ? rows : null;
+  if (!window.IntersectionObserver) return list.forEach((_, i) => load(i));
+  const io = new IntersectionObserver(entries => entries.forEach(en => {
+    if (!en.isIntersecting) return;
+    io.unobserve(en.target);
+    load(Number(en.target.dataset.i));
+  }), { root: scroller, rootMargin: '0px 0px 700px 0px' });
+  rows.querySelectorAll('.shelf[data-i]').forEach(s => io.observe(s));
 }
 
 // ---- grid page ("See all")
 async function browse(type, list, genre) {
   setTab(type);
   const title = list === 'year' ? `New ${type === 'movie' ? 'movies' : 'series'} of ${genre || YEAR}` : `${genre || 'Popular'} ${type === 'movie' ? 'movies' : 'series'}`;
-  view.innerHTML = `<div class="page"><h1 class="page-title">${esc(title)}</h1><div id="grid">${skeletonGrid(18)}</div></div>`;
+  const memo = navMemory.get(hashKey());
+  if (memo) memo.focused = false;
+  setPage('browse', `<div class="page"><h1 class="page-title">${esc(title)}</h1><div id="grid">${skeletonGrid(18)}</div></div>`);
   let items = [];
   const load = async () => {
-    const more = await getJSON(`/api/catalog?type=${type}&list=${list}&genre=${encodeURIComponent(genre)}&skip=${items.length}`);
+    const more = await cachedJSON(`/api/catalog?type=${type}&list=${list}&genre=${encodeURIComponent(genre)}&skip=${items.length}`);
     items = items.concat(more.filter(m => !items.some(i => i.id === m.id)));
     $('#grid').innerHTML = `<div class="grid">${items.map(poster).join('')}</div>
       ${more.length ? '<button class="pill more focusable" id="moreBtn">Load more</button>' : ''}`;
     const btn = $('#moreBtn');
     if (btn) btn.onclick = () => { const n = items.length; load().then(() => $('#grid .grid').children[n]?.focus()); };
+    return more.length;
   };
-  try { await load(); } catch (e) { $('#grid').innerHTML = `<div class="error">Could not load: ${esc(e.message)}</div>`; }
+  try {
+    // Coming back: load as many pages as were open, then return to the same spot.
+    for (let n = await load(); memo && n && items.length < memo.count;) n = await load();
+    if (memo && $('#grid')?.isConnected) { scrollTo(0, memo.y); restoreIn(view, memo); }
+  } catch (e) {
+    if ($('#grid')) $('#grid').innerHTML = `<div class="error">Could not load: ${esc(e.message)}</div>`;
+  }
 }
 
+let searchToken = 0, focusResults = false;
 async function search(q) {
   setTab('');
-  $('#searchInput').value = q;
-  view.innerHTML = `<div class="page"><h1 class="page-title">“${esc(q)}”</h1>${skeletonGrid(12)}</div>`;
+  const token = ++searchToken;
+  const input = $('#searchInput');
+  if (document.activeElement !== input) input.value = q; // don't fight the user's typing
+  const memo = navMemory.get(hashKey());
+  if (memo) memo.focused = false;
+  // While typing, the previous results stay up until the new ones arrive.
+  if (view.dataset.page !== 'search') setPage('search', `<div class="page"><h1 class="page-title">“${esc(q)}”</h1>${skeletonGrid(12)}</div>`);
   try {
-    const [movies, series] = await Promise.all(['movie', 'series'].map(t => getJSON(`/api/catalog?type=${t}&q=${encodeURIComponent(q)}`)));
+    const [movies, series] = await Promise.all(['movie', 'series'].map(t => cachedJSON(`/api/catalog?type=${t}&q=${encodeURIComponent(q)}`)));
+    if (token !== searchToken || view.dataset.page !== 'search') return;
     $('.page').innerHTML = `<h1 class="page-title">“${esc(q)}”</h1>
       <h2>Movies</h2>${movies.length ? `<div class="grid">${movies.map(poster).join('')}</div>` : '<div class="empty">No movies found</div>'}
       <h2>Series</h2>${series.length ? `<div class="grid">${series.map(poster).join('')}</div>` : '<div class="empty">No series found</div>'}`;
+    if (focusResults) { focusResults = false; $('.page .poster-card')?.focus(); }
+    else if (memo) { scrollTo(0, memo.y); restoreIn(view, memo); }
   } catch (e) {
-    $('.page').innerHTML = `<div class="error">Search failed: ${esc(e.message)}</div>`;
+    if (token === searchToken && view.dataset.page === 'search') $('.page').innerHTML = `<div class="error">Search failed: ${esc(e.message)}</div>`;
   }
+}
+
+// ---- My List: Favorites + the user's watchlists
+const LIB_SORTS = {
+  added: ['Recently added', (a, b) => (b.added || 0) - (a.added || 0)],
+  name: ['Title A–Z', (a, b) => String(a.name).localeCompare(String(b.name))],
+  year: ['Newest first', (a, b) => (parseInt(b.year) || 0) - (parseInt(a.year) || 0)],
+  rating: ['Top rated', (a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0)],
+};
+
+function libraryPage(id) {
+  setTab('library');
+  const memo = navMemory.get(hashKey());
+  if (memo) memo.focused = false;
+  let cur = library.get(id) || library.lists()[0];
+  let editing = false;
+  setPage('library', `<div class="page library">
+    <h1 class="page-title">My List</h1>
+    <div class="chips lib-tabs" id="libTabs" role="tablist"></div>
+    <div class="lib-bar" id="libBar"></div>
+    <div id="libGrid"></div></div>`);
+
+  const show = list => {
+    cur = list;
+    editing = false;
+    history.replaceState(history.state, '', `#/library/${encodeURIComponent(list.id)}`);
+    render();
+  };
+  const render = (focus) => {
+    const sort = LIB_SORTS[store.get('libSort', 'added')] ? store.get('libSort', 'added') : 'added';
+    $('#libTabs').innerHTML = library.lists().map(l => `<button class="chip focusable ${l.id === cur.id ? 'active' : ''}" role="tab" aria-selected="${l.id === cur.id}" data-list="${esc(l.id)}">
+        ${l.id === 'fav' ? ICON.heart : ''}${esc(l.name)}<span class="n">${l.items.length}</span></button>`).join('')
+      + `<button class="chip focusable add" id="libNew">${ICON.plus}New list</button>`;
+    $('#libBar').innerHTML = `
+      <select id="libSort" class="focusable" aria-label="Sort">${Object.entries(LIB_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === sort ? 'selected' : ''}>${label}</option>`).join('')}</select>
+      <span class="spacer"></span>
+      ${cur.items.length ? `<button class="pill focusable ${editing ? 'primary' : ''}" id="libEdit">${editing ? 'Done' : 'Remove titles'}</button>` : ''}
+      ${cur.id !== 'fav' ? '<button class="pill focusable" id="libRename">Rename</button><button class="pill focusable danger" id="libDelete">Delete list</button>' : ''}`;
+    const items = [...cur.items].sort(LIB_SORTS[sort][1]);
+    $('#libGrid').innerHTML = items.length
+      ? `<div class="grid ${editing ? 'editing' : ''}">${items.map(m => (editing ? removable(m) : poster(m))).join('')}</div>`
+      : `<div class="lib-empty">${cur.id === 'fav' ? ICON.heart : ICON.bookmark}
+          <h2>${cur.id === 'fav' ? 'No favorites yet' : `“${esc(cur.name)}” is empty`}</h2>
+          <p>${cur.id === 'fav' ? 'Open any movie or series and press <b>Favorite</b> to keep it here.' : 'Open any movie or series and press <b>Add to list</b>.'}</p>
+          <a class="pill primary focusable" href="#/">Find something to watch</a></div>`;
+
+    $('#libTabs').querySelectorAll('[data-list]').forEach(b => b.onclick = () => { show(library.get(b.dataset.list)); $(`#libTabs [data-list="${CSS.escape(cur.id)}"]`)?.focus(); });
+    $('#libNew').onclick = async () => {
+      const name = await ask({ title: 'New list', value: '', ok: 'Create', placeholder: 'e.g. Weekend movies' });
+      if (name) { show(library.create(name)); $(`#libTabs [data-list="${CSS.escape(cur.id)}"]`)?.focus(); } else $('#libNew')?.focus();
+    };
+    $('#libSort').onchange = e => { store.set('libSort', e.target.value); render('#libSort'); };
+    if ($('#libEdit')) $('#libEdit').onclick = () => { editing = !editing; render('#libEdit'); };
+    if ($('#libRename')) $('#libRename').onclick = async () => {
+      const name = await ask({ title: 'Rename list', value: cur.name, ok: 'Save' });
+      if (name) library.rename(cur.id, name);
+      render('#libRename');
+    };
+    if ($('#libDelete')) $('#libDelete').onclick = async () => {
+      const ok = await ask({ title: `Delete “${cur.name}”?`, text: cur.items.length ? `Its ${cur.items.length} title${cur.items.length === 1 ? '' : 's'} stay in your other lists.` : 'The list is empty.', ok: 'Delete', danger: true });
+      if (!ok) return $('#libDelete')?.focus();
+      const name = cur.name;
+      library.remove(cur.id);
+      show(library.get('fav'));
+      $('#libTabs .chip.active')?.focus();
+      toast(`Deleted “${name}”`);
+    };
+    $('#libGrid').querySelectorAll('.removable').forEach((b, i) => b.onclick = () => {
+      const m = cur.items.find(x => `${x.type}:${x.id}` === b.dataset.key);
+      if (!m) return;
+      library.toggle(cur.id, m);
+      toast(`Removed “${m.name}”`, 2200);
+      if (!cur.items.length) editing = false;
+      render();
+      const cards = $('#libGrid').querySelectorAll('.removable');
+      (cards[Math.min(i, cards.length - 1)] || $('#libTabs .chip.active')).focus();
+    });
+    if (typeof focus === 'string') $(focus)?.focus();
+  };
+  render();
+  if (memo) { scrollTo(0, memo.y); restoreIn(view, memo); }
+}
+const removable = m => `<button class="poster-card removable focusable" data-key="${esc(`${m.type}:${m.id}`)}" aria-label="Remove ${esc(m.name)}">
+    <div class="poster-art">${m.poster ? lazyImg(m.poster) : ''}<span class="remove-x">${ICON.x}</span></div>
+    <div class="poster-name">${esc(m.name)}</div>
+    <div class="poster-sub">${esc(m.year || '')}</div>
+  </button>`;
+
+// Small modal for a name or a yes/no question. Resolves to the text, true, or null (cancelled).
+function ask({ title, text = '', value, ok = 'OK', danger = false, placeholder = '' }) {
+  const d = $('#ask');
+  const withInput = value !== undefined;
+  d.innerHTML = `<form id="askForm">
+    <h2 style="margin-top:0">${esc(title)}</h2>
+    ${text ? `<p class="muted">${esc(text)}</p>` : ''}
+    ${withInput ? `<input id="askInput" class="focusable" maxlength="40" autocomplete="off" value="${esc(value)}" placeholder="${esc(placeholder)}">` : ''}
+    <div class="actions"><button type="button" class="pill focusable" id="askCancel">Cancel</button>
+      <button class="pill primary focusable ${danger ? 'danger' : ''}" id="askOk">${esc(ok)}</button></div></form>`;
+  return new Promise(resolve => {
+    let result = null;
+    d.onclose = () => { d.onclose = null; resolve(result); };
+    $('#askCancel').onclick = () => d.close();
+    $('#askForm').onsubmit = e => {
+      e.preventDefault();
+      if (withInput) {
+        const v = $('#askInput').value.trim();
+        if (!v) return $('#askInput').focus();
+        result = v;
+      } else result = true;
+      d.close();
+    };
+    d.showModal();
+    (withInput ? $('#askInput') : $('#askCancel')).focus();
+  });
+}
+
+// "Add to list" on a title page: tick the lists this title belongs to, or make a new one.
+function openListPicker(meta, onChange) {
+  const d = $('#ask');
+  d.onclose = () => { d.onclose = null; $('#listBtn')?.focus(); };
+  const render = focusId => {
+    const lists = library.lists().filter(l => l.id !== 'fav');
+    d.innerHTML = `<h2 style="margin-top:0">Add to list</h2>
+      <p class="muted" style="margin-top:-.4rem">${esc(meta.name)}</p>
+      <div class="pick">${lists.map(l => {
+        const on = library.has(l.id, meta);
+        return `<button class="opt focusable ${on ? 'active' : ''}" data-list="${esc(l.id)}" role="checkbox" aria-checked="${on}">
+          <span class="box">${on ? ICON.check : ''}</span><span class="t">${esc(l.name)}</span><span class="p">${l.items.length}</span></button>`;
+      }).join('')}</div>
+      <form class="pick-new" id="pickNew"><input id="pickName" class="focusable" maxlength="40" autocomplete="off" placeholder="New list name">
+        <button class="pill focusable">${ICON.plus}Create</button></form>
+      <div class="actions"><button class="pill primary focusable" id="pickDone">Done</button></div>`;
+    d.querySelectorAll('[data-list]').forEach(b => b.onclick = () => {
+      const on = library.toggle(b.dataset.list, meta);
+      toast(`${on ? 'Added to' : 'Removed from'} ${library.get(b.dataset.list).name}`, 1800);
+      onChange();
+      render(b.dataset.list);
+    });
+    $('#pickNew').onsubmit = e => {
+      e.preventDefault();
+      const name = $('#pickName').value.trim();
+      if (!name) return $('#pickName').focus();
+      const l = library.create(name);
+      library.toggle(l.id, meta);
+      toast(`Added to ${name}`, 1800);
+      onChange();
+      render(l.id);
+    };
+    $('#pickDone').onclick = () => d.close();
+    (focusId ? d.querySelector(`[data-list="${CSS.escape(focusId)}"]`) : d.querySelector('.opt') || $('#pickName')).focus();
+  };
+  render();
+  d.showModal();
+  (d.querySelector('.opt') || $('#pickName')).focus();
+}
+
+function renderLibActions(meta) {
+  const box = $('#libActions');
+  if (!box) return;
+  const fav = library.isFav(meta), lists = library.listsWith(meta);
+  box.innerHTML = `
+    <button class="pill ghost lib-btn focusable ${fav ? 'on' : ''}" id="favBtn" aria-pressed="${fav}">${ICON.heart}<span>${fav ? 'Favorited' : 'Favorite'}</span></button>
+    <button class="pill ghost lib-btn focusable ${lists.length ? 'on' : ''}" id="listBtn">${ICON.bookmark}<span>${lists.length === 1 ? esc(lists[0].name) : lists.length ? `In ${lists.length} lists` : 'Add to list'}</span></button>`;
+  $('#favBtn').onclick = () => {
+    const on = library.toggle('fav', meta);
+    toast(on ? 'Added to Favorites' : 'Removed from Favorites', 1800);
+    renderLibActions(meta);
+    $('#favBtn').classList.add('just');
+    $('#favBtn').focus();
+  };
+  $('#listBtn').onclick = () => openListPicker(meta, () => renderLibActions(meta));
 }
 
 const FARSI_AUDIO = /🇮🇷|farsi|persian|dubbed[ ._-]?fa|دوبله/i;
@@ -260,13 +609,18 @@ function pickBest(list, { same, bingeGroup } = {}) {
 
 async function detail(type, id, videoId) {
   setTab(type);
-  view.innerHTML = `<div class="detail"><section class="hero detail-hero"><div class="hero-info in"><div class="skeleton" style="height:3.5rem;width:22rem;max-width:80%"></div></div></section></div>`;
+  scrollTo(0, 0);
+  const metaP = cachedJSON(`/api/meta/${type}/${encodeURIComponent(id)}`);
+  // Prefetched titles render straight away; others show a placeholder first.
+  const ready = await Promise.race([metaP.then(() => true, () => true), new Promise(r => setTimeout(r, 30, false))]);
+  if (!ready) setPage('detail', `<div class="detail"><section class="hero detail-hero"><div class="hero-info in"><div class="skeleton" style="height:3.5rem;width:22rem;max-width:80%"></div></div></section></div>`);
   let meta;
-  try { meta = await getJSON(`/api/meta/${type}/${encodeURIComponent(id)}`); }
-  catch (e) { view.innerHTML = `<div class="page"><div class="error">Could not load title: ${esc(e.message)}</div></div>`; return; }
+  try { meta = await metaP; }
+  catch (e) { setPage('detail', `<div class="page"><div class="error">Could not load title: ${esc(e.message)}</div></div>`); return; }
+  if (location.hash.indexOf(`#/title/${type}/${encodeURIComponent(id)}`) !== 0) return; // navigated away meanwhile
 
   const saved = progress.get(meta.id);
-  view.innerHTML = `<div class="detail">
+  setPage('detail', `<div class="detail">
     <section class="hero detail-hero">
       ${meta.background || meta.poster ? `<img class="hero-bg on" src="${esc(meta.background || meta.poster)}" alt="">` : ''}
       <div class="hero-info in">
@@ -274,13 +628,14 @@ async function detail(type, id, videoId) {
         <div class="meta-line">${metaLine(meta)}</div>
         <p class="hero-desc full">${esc(meta.description || '')}</p>
         ${meta.cast.length ? `<p class="cast">${esc(meta.cast.slice(0, 5).join(', '))}</p>` : ''}
-        <div class="hero-actions" id="heroActions"></div>
+        <div class="hero-actions"><div class="play-slot" id="heroActions"></div><div class="lib-actions" id="libActions"></div></div>
       </div>
     </section>
     <div class="detail-body ${type === 'series' ? 'split' : ''}">
       ${type === 'series' ? '<div><h2>Episodes</h2><select class="season focusable" id="seasonSel"></select><div class="episodes" id="eps"></div></div>' : ''}
       <div><h2 id="srcTitle">Sources</h2><div class="chips" id="qChips"></div><div class="sources" id="sources"></div></div>
-    </div></div>`;
+    </div></div>`);
+  renderLibActions(meta);
 
   if (type === 'movie') return loadSources(meta, null);
 
@@ -295,7 +650,7 @@ async function detail(type, id, videoId) {
     const eps = meta.videos.filter(v => v.season === Number(sel.value));
     $('#eps').innerHTML = eps.map(v => `
       <button class="ep focusable ${v.id === current.id ? 'active' : ''}" data-id="${esc(v.id)}">
-        ${v.thumbnail ? `<img src="${esc(v.thumbnail)}" alt="" loading="lazy">` : '<img alt="">'}
+        <span class="ep-art">${v.thumbnail ? lazyImg(v.thumbnail) : ''}</span>
         <div style="text-align:left"><div class="n">Episode ${v.episode}${v.released ? ' · ' + new Date(v.released).toLocaleDateString() : ''}</div><div>${esc(v.title || '')}</div></div>
       </button>`).join('');
     $('#eps').querySelectorAll('.ep').forEach(b => b.onclick = () => {
@@ -324,7 +679,7 @@ async function loadSources(meta, video) {
   actions.innerHTML = `<button class="pill primary play-btn" disabled>Finding the best source…</button>`;
   let list;
   try {
-    list = await getJSON(`/api/streams/${meta.type}/${encodeURIComponent(videoId)}?addon=${encodeURIComponent(settings.torrentio)}`);
+    list = await cachedJSON(streamsPath(meta.type, videoId), 5 * 60 * 1000);
   } catch (e) {
     if (token === sourcesToken) { box.innerHTML = `<div class="error">Torrentio error: ${esc(e.message)}</div>`; actions.innerHTML = ''; }
     return;
@@ -678,8 +1033,7 @@ const player = (() => {
     if (!st || !dur || pos < 5) return;
     const { meta, ep, stream } = st;
     progress.save({
-      id: meta.id, type: meta.type, name: meta.name, poster: meta.poster, background: meta.background, logo: meta.logo,
-      year: meta.year, rating: meta.rating, runtime: meta.runtime, genres: meta.genres.slice(0, 3), description: (meta.description || '').slice(0, 400),
+      ...brief(meta),
       videoId: st.videoId, season: ep?.season, episode: ep?.episode, pos, dur,
       // Resume uses the same source (same file, so the position and the subtitle sync still fit).
       src: stream.infoHash ? { infoHash: stream.infoHash, fileIdx: stream.fileIdx ?? null } : { url: stream.url },
@@ -737,7 +1091,7 @@ const player = (() => {
     const { meta, stream } = st;
     showLoading(`Finding S${next.season}E${next.episode}…`);
     try {
-      const list = await getJSON(`/api/streams/series/${encodeURIComponent(next.id)}?addon=${encodeURIComponent(settings.torrentio)}`);
+      const list = await cachedJSON(streamsPath('series', next.id), 5 * 60 * 1000);
       const pick = pickBest(list, { bingeGroup: stream.bingeGroup });
       if (!pick) throw new Error('No sources for next episode');
       open({ meta, video: next, stream: pick, resumeAt: 0 });
@@ -925,6 +1279,7 @@ async function openSettings() {
       apiBase: $('#sApi').value.trim(),
     };
     store.set('settings', settings);
+    jsonCache.clear(); // the server or Torrentio address may have changed
     d.close();
     if (desktop && $('#sLan').checked !== desktop.lanSharing) {
       toast('Restarting CineMoy…');
@@ -1019,9 +1374,12 @@ const openDialog = () => document.querySelector('dialog[open]');
 const FOCUSABLE = '.focusable, button, input, select, a[href]';
 function candidates(scope) {
   // tabindex="-1" (logo, "See all" headings) is mouse-only; the row's own "See all" tile covers remotes.
-  return [...scope.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.getAttribute('tabindex') !== '-1' && el.getClientRects().length && !el.closest('[hidden]') && getComputedStyle(el).visibility !== 'hidden');
+  return [...scope.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.getAttribute('tabindex') !== '-1' && !el.closest('[hidden]') && el.getClientRects().length);
 }
-function moveFocus(dir) {
+// Held arrow keys: jump instead of animating, so the view keeps up with the focus.
+const INSTANT = (() => { try { document.createElement('div').scrollTo({ top: 0, behavior: 'instant' }); return 'instant'; } catch { return 'auto'; } })();
+function moveFocus(dir, fast) {
+  const behavior = fast ? INSTANT : 'smooth';
   let scope = document;
   const dialog = openDialog();
   if (dialog) scope = dialog;
@@ -1050,13 +1408,13 @@ function moveFocus(dir) {
     if (rows && shelf && rows.contains(shelf)) {
       // Fire TV style: the focused shelf snaps to the top of the rows area (absolute target, so
       // fast key repeats don't drift), and the row scrolls sideways only when the tile is cut off.
-      if (vertical) rows.scrollTo({ top: shelf.offsetTop, behavior: 'smooth' });
+      if (vertical) rows.scrollTo({ top: shelf.offsetTop, behavior });
       const row = best.closest('.row'), r = row?.getBoundingClientRect(), b = best.getBoundingClientRect();
-      if (row && (b.left < r.left || b.right > r.right)) row.scrollBy({ left: b.left < r.left ? b.left - r.left - 40 : b.right - r.right + 40, behavior: 'smooth' });
+      if (row && (b.left < r.left || b.right > r.right)) row.scrollBy({ left: b.left < r.left ? b.left - r.left - 40 : b.right - r.right + 40, behavior });
     } else if (vertical && rows && !rows.contains(best)) {
-      rows.scrollTo({ top: 0, behavior: 'smooth' });
+      rows.scrollTo({ top: 0, behavior });
     } else {
-      best.scrollIntoView({ block: vertical ? 'center' : 'nearest', inline: 'nearest', behavior: 'smooth' });
+      best.scrollIntoView({ block: vertical ? 'center' : 'nearest', inline: 'nearest', behavior });
     }
   }
 }
@@ -1081,8 +1439,13 @@ document.addEventListener('keydown', e => {
   if (isTyping() && (dir === 'left' || dir === 'right')) return;
   if (document.activeElement?.tagName === 'SELECT' && (dir === 'up' || dir === 'down') && !matchMedia('(pointer: none)').matches) return;
   e.preventDefault();
-  moveFocus(dir);
+  // Remotes repeat a held key ~30 times a second; a few steps a second is enough and stays smooth.
+  const t = performance.now();
+  if (e.repeat && t - lastMove < 85) return;
+  lastMove = t;
+  moveFocus(dir, e.repeat);
 });
+let lastMove = 0;
 // Enter on a focused <label> (file picker) or link-like element.
 document.addEventListener('keydown', e => {
   if (e.key === 'Enter' && document.activeElement?.tagName === 'LABEL') document.activeElement.querySelector('input')?.click();
@@ -1101,23 +1464,52 @@ window.__cmBack = () => {
 try { ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaFastForward', 'MediaRewind'].forEach(k => window.tizen?.tvinputdevice?.registerKey(k)); } catch { /* not Tizen */ }
 
 // ---------------------------------------------------------------- router + boot
+// Results update while typing; Enter (or the TV keyboard's Search key) moves to the results.
+const searchHash = q => `#/search/${encodeURIComponent(q)}`;
+function runSearch(q) {
+  if (location.hash === searchHash(q)) return false;
+  if (location.hash.startsWith('#/search/')) { history.replaceState(history.state, '', searchHash(q)); router(); }
+  else location.hash = searchHash(q);
+  return true;
+}
+let searchTimer;
+$('#searchInput').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  const q = $('#searchInput').value.trim();
+  if (q.length >= 2) searchTimer = setTimeout(() => runSearch(q), 450);
+});
 $('#searchForm').onsubmit = e => {
   e.preventDefault();
+  clearTimeout(searchTimer);
   const q = $('#searchInput').value.trim();
-  if (q) location.hash = `#/search/${encodeURIComponent(q)}`;
+  if (!q) return;
+  focusResults = true;
+  if (!runSearch(q) && view.dataset.page === 'search' && $('.page .poster-card')) { focusResults = false; $('.page .poster-card').focus(); }
 };
 
+// The top bar gets a solid background once the page scrolls under it.
+addEventListener('scroll', () => $('#topbar').classList.toggle('solid', scrollY > 24), { passive: true });
+// A nav tab always opens its page fresh (Back still restores where you were).
+document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => navMemory.delete(t.getAttribute('href'))));
+
 function router() {
-  const h = location.hash || '#/';
+  const h = hashKey();
   let m;
   if ((m = h.match(/^#\/title\/(movie|series)\/([^/]+)(?:\/([^/]+))?$/))) return detail(m[1], decodeURIComponent(m[2]), m[3] && decodeURIComponent(m[3]));
   if ((m = h.match(/^#\/search\/(.+)$/))) return search(decodeURIComponent(m[1]));
+  if (document.activeElement !== $('#searchInput')) $('#searchInput').value = '';
   if ((m = h.match(/^#\/browse\/(movie|series)\/(top|year)\/([^/]*)$/))) return browse(m[1], m[2], decodeURIComponent(m[3]));
+  if ((m = h.match(/^#\/library(?:\/([^/]+))?$/))) return libraryPage(m[1] && decodeURIComponent(m[1]));
   if (h === '#/movies') return shelves('movie');
   if (h === '#/series') return shelves('series');
   return shelves('home');
 }
-addEventListener('hashchange', () => { if (!player.isOpen()) { router(); scrollTo(0, 0); } });
+addEventListener('hashchange', e => {
+  if (player.isOpen()) return;
+  rememberView(new URL(e.oldURL).hash || '#/');
+  scrollTo(0, 0);
+  router();
+});
 
 async function loadServerConfig() {
   try { serverConfig = await getJSON('/api/config'); }

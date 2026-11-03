@@ -1,6 +1,6 @@
 {
   "name": "cinemoy",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Compact movie/series streaming app: Cinemeta catalog + Torrentio streams + Farsi subtitles. Runs on Windows (Electron), web and TV browsers.",
   "homepage": "https://cinemoy.fun",
   "author": {
