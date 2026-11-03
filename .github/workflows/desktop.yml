@@ -5,7 +5,6 @@ name: Desktop builds (macOS, Linux)
 on:
   push:
     tags: ['v*']
-    branches: [desktop-mac-linux]
   workflow_dispatch:
 
 permissions:

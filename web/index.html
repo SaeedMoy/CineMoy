@@ -9,7 +9,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;600;800&display=swap">
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <header id="topbar">
@@ -18,6 +18,7 @@
       <a class="tab focusable" href="#/" data-tab="home" tabindex="0">Home</a>
       <a class="tab focusable" href="#/movies" data-tab="movie" tabindex="0">Movies</a>
       <a class="tab focusable" href="#/series" data-tab="series" tabindex="0">Series</a>
+      <a class="tab focusable" href="#/library" data-tab="library" tabindex="0">My List</a>
     </nav>
     <form id="searchForm" role="search">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -63,8 +64,9 @@
 
   <dialog id="settings"></dialog>
   <dialog id="update"></dialog>
+  <dialog id="ask"></dialog>
   <div id="toast" hidden></div>
 
-  <script src="app.js?v=7" type="module"></script>
+  <script src="app.js?v=8" type="module"></script>
 </body>
 </html>
